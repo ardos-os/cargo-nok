@@ -1,0 +1,8 @@
+[package]
+name = "cargo-nok"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+colored = "3.1.1"
+tinyjson = "2.5.1"
