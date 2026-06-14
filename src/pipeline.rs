@@ -45,7 +45,9 @@ fn build_module(args: Vec<String>) -> Result<(String, std::path::PathBuf)> {
             .arg("--whole-archive")
             .arg(&rlib)
             .arg("--no-whole-archive")
+            .arg("--start-group")
             .args(deps_rlibs)
+            .arg("--end-group")
             .arg("-o")
             .arg(&module_object),
     )?;
