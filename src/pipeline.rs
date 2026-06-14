@@ -13,7 +13,7 @@ fn build_module(args: Vec<String>) -> Result<(String, std::path::PathBuf)> {
     let cargo = Cargo::from_env();
     let package = cargo.package(&args)?;
     let module_name = package.crate_name.replace('-', "_");
-    let rlib = cargo.build(&kernel, &args, &package, &module_name)?;
+    let (rlib, deps_rlibs) = cargo.build(&kernel, &args, &package, &module_name)?;
     let artifact_dir = rlib
         .parent()
         .ok_or_else(|| format!("Cargo artifact has no parent: {}", rlib.display()))?;
@@ -37,6 +37,7 @@ fn build_module(args: Vec<String>) -> Result<(String, std::path::PathBuf)> {
             .arg("--whole-archive")
             .arg(&rlib)
             .arg("--no-whole-archive")
+            .args(deps_rlibs)
             .arg("-o")
             .arg(&module_object),
     )?;

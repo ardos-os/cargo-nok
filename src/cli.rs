@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::Result;
 
 pub fn validate_cargo_args(args: &[String]) -> Result<()> {
-    for reserved in ["--target", "--message-format"] {
+    for reserved in ["--target"] {
         if option_present(args, reserved) {
             return Err(
                 format!("`{reserved}` is managed by cargo-nok and cannot be overridden").into(),
@@ -48,7 +48,6 @@ mod tests {
     fn rejects_reserved_cargo_options() {
         assert!(validate_cargo_args(&["--target".into(), "custom.json".into()]).is_err());
         assert!(validate_cargo_args(&["--target=custom.json".into()]).is_err());
-        assert!(validate_cargo_args(&["--message-format=json".into()]).is_err());
         assert!(validate_cargo_args(&["--release".into()]).is_ok());
     }
 

@@ -96,17 +96,20 @@ impl Cargo {
                 .clone(),
         })
     }
-
-    pub fn build(
+pub fn build(
         &self,
         kernel: &KernelBuild,
         args: &[String],
         package: &Package,
         module_name: &str,
-    ) -> Result<PathBuf> {
+    ) -> Result<(PathBuf, Vec<PathBuf>)> { // 1. Alterada a assinatura de retorno
+        dbg!(args);
+        let message_format_json = args.iter().any(|s| s == "--message-format=json");
+        let args = args.iter().filter(|s| *s != "--message-format=json").cloned().collect::<Vec<_>>();
+        let args = args.as_slice();
         let mut command = self.command("build", kernel, args, module_name);
         command
-            .arg("--message-format=json-render-diagnostics")
+            .arg(if message_format_json {"--message-format=json"} else {"--message-format=json-render-diagnostics"})
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
@@ -116,10 +119,16 @@ impl Cargo {
             .stdout
             .take()
             .ok_or("failed to capture Cargo output")?;
-        let mut rlib = None;
+        
+        let mut main_rlib = None;
+        let mut deps_rlibs = Vec::new(); // 2. Vetor para guardar as dependências
 
         for line in BufReader::new(stdout).lines() {
             let line = line?;
+            if message_format_json {
+                println!("{line}");
+                continue;
+            }
             let Ok(message) = line.parse::<JsonValue>() else {
                 println!("{line}");
                 continue;
@@ -131,17 +140,33 @@ impl Cargo {
                         eprint!("{rendered}");
                     }
                 }
-                Some("compiler-artifact")
-                    if message["package_id"].get::<String>() == Some(&package.id)
-                        && message["target"]["name"].get::<String>()
-                            == Some(&package.crate_name) =>
-                {
-                    if let Some(filenames) = message["filenames"].get::<Vec<JsonValue>>() {
-                        rlib = filenames
+                Some("compiler-artifact") => {
+                    // Extrai o .rlib se existir neste artifact
+                    let rlib_path = if let Some(filenames) = message["filenames"].get::<Vec<JsonValue>>() {
+                        filenames
                             .iter()
                             .filter_map(|filename| filename.get::<String>())
                             .map(PathBuf::from)
-                            .find(|filename| filename.extension() == Some(OsStr::new("rlib")));
+                            .find(|filename| filename.extension() == Some(OsStr::new("rlib")))
+                    } else {
+                        None
+                    };
+
+                    // Se encontrámos um .rlib, vamos ver a quem pertence
+                    if let Some(rlib) = rlib_path {
+                        let is_main_package = message["package_id"].get::<String>() == Some(&package.id)
+                            && message["target"]["name"].get::<String>() == Some(&package.crate_name);
+
+                        if is_main_package {
+                            main_rlib = Some(rlib); // É o teu módulo
+                        } else {
+                            // É uma dependência! Mas excluímos scripts de build ou binários acidentais
+                            if message["target"]["kind"].get::<Vec<JsonValue>>().map_or(false, |kinds| {
+                                kinds.iter().any(|k| k.get::<String>().is_some_and(|s| s == "lib"))
+                            }) {
+                                deps_rlibs.push(rlib);
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -153,13 +178,14 @@ impl Cargo {
             return Err(format!("command failed with {status}: {printable}").into());
         }
 
-        rlib.ok_or_else(|| {
+        let rlib = main_rlib.ok_or_else(|| {
             format!(
                 "Cargo did not report an rlib artifact for `{}`",
                 package.crate_name
             )
-            .into()
-        })
+        })?;
+
+        Ok((rlib, deps_rlibs)) // 3. Devolvemos ambos
     }
 
     pub fn expand(&self, kernel: &KernelBuild, args: &[String], module_name: &str) -> Result<()> {
