@@ -7,13 +7,21 @@ pub fn build(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+pub fn check(args: Vec<String>) -> Result<()> {
+    cli::validate_cargo_args(&args)?;
+    let kernel = KernelBuild::discover()?;
+    let cargo = Cargo::from_env();
+    let package = cargo.package(&args)?;
+    cargo.check(&kernel, &args, &package.modfile)
+}
+
 fn build_module(args: Vec<String>) -> Result<(String, std::path::PathBuf)> {
     cli::validate_cargo_args(&args)?;
     let kernel = KernelBuild::discover()?;
     let cargo = Cargo::from_env();
     let package = cargo.package(&args)?;
     let module_name = package.crate_name.replace('-', "_");
-    let (rlib, deps_rlibs) = cargo.build(&kernel, &args, &package, &module_name)?;
+    let (rlib, deps_rlibs) = cargo.build(&kernel, &args, &package)?;
     let artifact_dir = rlib
         .parent()
         .ok_or_else(|| format!("Cargo artifact has no parent: {}", rlib.display()))?;
@@ -115,8 +123,7 @@ pub fn expand(args: Vec<String>) -> Result<()> {
     let kernel = KernelBuild::discover()?;
     let cargo = Cargo::from_env();
     let package = cargo.package(&args)?;
-    let module_name = package.crate_name.replace('-', "_");
-    cargo.expand(&kernel, &args, &module_name)
+    cargo.expand(&kernel, &args, &package.modfile)
 }
 
 pub fn load(args: Vec<String>) -> Result<()> {

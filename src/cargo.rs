@@ -6,7 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use tinyjson::JsonValue;
+use serde_json::Value;
 
 use crate::{Result, cli, kernel::KernelBuild, process};
 
@@ -14,6 +14,7 @@ pub struct Package {
     pub source: PathBuf,
     id: String,
     pub crate_name: String,
+    pub modfile: PathBuf,
 }
 
 pub struct Cargo {
@@ -40,22 +41,17 @@ impl Cargo {
             return Err("cargo metadata failed".into());
         }
 
-        let json = String::from_utf8(output.stdout)?;
-        let parsed: JsonValue = json.parse()?;
+        let parsed: Value = serde_json::from_slice(&output.stdout)?;
         let packages = parsed["packages"]
-            .get::<Vec<JsonValue>>()
+            .as_array()
             .ok_or("cargo metadata has no packages")?;
         let requested = cli::string_option(args, "--package", Some("-p"));
         let package = if let Some(requested) = requested {
             packages
                 .iter()
                 .find(|package| {
-                    package["name"]
-                        .get::<String>()
-                        .is_some_and(|name| name == &requested)
-                        || package["id"]
-                            .get::<String>()
-                            .is_some_and(|id| id == &requested)
+                    package["name"].as_str() == Some(&requested)
+                        || package["id"].as_str() == Some(&requested)
                 })
                 .ok_or_else(|| format!("package `{requested}` was not found in Cargo metadata"))?
         } else if packages.len() == 1 {
@@ -67,49 +63,71 @@ impl Cargo {
             );
         };
         let targets = package["targets"]
-            .get::<Vec<JsonValue>>()
+            .as_array()
             .ok_or("package has no targets")?;
         let target = targets
             .iter()
             .find(|target| {
-                target["kind"].get::<Vec<JsonValue>>().is_some_and(|kinds| {
+                target["kind"].as_array().is_some_and(|kinds| {
                     kinds
                         .iter()
-                        .any(|kind| kind.get::<String>().is_some_and(|kind| kind == "rlib"))
+                        .any(|kind| kind.as_str().is_some_and(|kind| kind == "rlib"))
                 })
             })
             .ok_or("package must have an rlib target")?;
 
+        let source = PathBuf::from(
+            target["src_path"]
+                .as_str()
+                .ok_or("rlib target has no src_path")?,
+        );
+        let manifest = PathBuf::from(
+            package["manifest_path"]
+                .as_str()
+                .ok_or("package has no manifest_path")?,
+        );
+        let crate_root = manifest
+            .parent()
+            .ok_or("package manifest has no parent directory")?;
+        let modfile = source
+            .strip_prefix(crate_root)
+            .map_err(|_| "rlib source is outside the crate root")?
+            .to_path_buf();
+
         Ok(Package {
-            source: PathBuf::from(
-                target["src_path"]
-                    .get::<String>()
-                    .ok_or("rlib target has no src_path")?,
-            ),
+            source,
             id: package["id"]
-                .get::<String>()
+                .as_str()
                 .ok_or("package has no id")?
-                .clone(),
+                .to_owned(),
             crate_name: target["name"]
-                .get::<String>()
+                .as_str()
                 .ok_or("rlib target has no name")?
-                .clone(),
+                .to_owned(),
+            modfile,
         })
     }
-pub fn build(
+
+    pub fn build(
         &self,
         kernel: &KernelBuild,
         args: &[String],
         package: &Package,
-        module_name: &str,
-    ) -> Result<(PathBuf, Vec<PathBuf>)> { // 1. Alterada a assinatura de retorno
-        dbg!(args);
+    ) -> Result<(PathBuf, Vec<PathBuf>)> {
         let message_format_json = args.iter().any(|s| s == "--message-format=json");
-        let args = args.iter().filter(|s| *s != "--message-format=json").cloned().collect::<Vec<_>>();
+        let args = args
+            .iter()
+            .filter(|s| *s != "--message-format=json")
+            .cloned()
+            .collect::<Vec<_>>();
         let args = args.as_slice();
-        let mut command = self.command("build", kernel, args, module_name);
+        let mut command = self.command("build", kernel, args, &package.modfile);
         command
-            .arg(if message_format_json {"--message-format=json"} else {"--message-format=json-render-diagnostics"})
+            .arg(if message_format_json {
+                "--message-format=json"
+            } else {
+                "--message-format=json-render-diagnostics"
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
@@ -119,53 +137,51 @@ pub fn build(
             .stdout
             .take()
             .ok_or("failed to capture Cargo output")?;
-        
+
         let mut main_rlib = None;
-        let mut deps_rlibs = Vec::new(); // 2. Vetor para guardar as dependências
+        let mut deps_rlibs = Vec::new();
 
         for line in BufReader::new(stdout).lines() {
             let line = line?;
             if message_format_json {
                 println!("{line}");
-                continue;
             }
-            let Ok(message) = line.parse::<JsonValue>() else {
-                println!("{line}");
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                if !message_format_json {
+                    println!("{line}");
+                }
                 continue;
             };
 
-            match message["reason"].get::<String>().map(String::as_str) {
+            match message["reason"].as_str() {
                 Some("compiler-message") => {
-                    if let Some(rendered) = message["message"]["rendered"].get::<String>() {
+                    if let Some(rendered) = message["message"]["rendered"].as_str() {
                         eprint!("{rendered}");
                     }
                 }
                 Some("compiler-artifact") => {
-                    // Extrai o .rlib se existir neste artifact
-                    let rlib_path = if let Some(filenames) = message["filenames"].get::<Vec<JsonValue>>() {
+                    let rlib_path = if let Some(filenames) = message["filenames"].as_array() {
                         filenames
                             .iter()
-                            .filter_map(|filename| filename.get::<String>())
+                            .filter_map(Value::as_str)
                             .map(PathBuf::from)
                             .find(|filename| filename.extension() == Some(OsStr::new("rlib")))
                     } else {
                         None
                     };
 
-                    // Se encontrámos um .rlib, vamos ver a quem pertence
                     if let Some(rlib) = rlib_path {
-                        let is_main_package = message["package_id"].get::<String>() == Some(&package.id)
-                            && message["target"]["name"].get::<String>() == Some(&package.crate_name);
+                        let is_main_package = message["package_id"].as_str() == Some(&package.id)
+                            && message["target"]["name"].as_str() == Some(&package.crate_name);
 
                         if is_main_package {
-                            main_rlib = Some(rlib); // É o teu módulo
-                        } else {
-                            // É uma dependência! Mas excluímos scripts de build ou binários acidentais
-                            if message["target"]["kind"].get::<Vec<JsonValue>>().map_or(false, |kinds| {
-                                kinds.iter().any(|k| k.get::<String>().is_some_and(|s| s == "lib"))
-                            }) {
-                                deps_rlibs.push(rlib);
-                            }
+                            main_rlib = Some(rlib);
+                        } else if message["target"]["kind"].as_array().is_some_and(|kinds| {
+                            kinds
+                                .iter()
+                                .any(|kind| kind.as_str().is_some_and(|kind| kind == "lib"))
+                        }) {
+                            deps_rlibs.push(rlib);
                         }
                     }
                 }
@@ -185,11 +201,15 @@ pub fn build(
             )
         })?;
 
-        Ok((rlib, deps_rlibs)) // 3. Devolvemos ambos
+        Ok((rlib, deps_rlibs))
     }
 
-    pub fn expand(&self, kernel: &KernelBuild, args: &[String], module_name: &str) -> Result<()> {
-        process::run(&mut self.command("expand", kernel, args, module_name))
+    pub fn expand(&self, kernel: &KernelBuild, args: &[String], modfile: &PathBuf) -> Result<()> {
+        process::run(&mut self.command("expand", kernel, args, modfile))
+    }
+
+    pub fn check(&self, kernel: &KernelBuild, args: &[String], modfile: &PathBuf) -> Result<()> {
+        process::run(&mut self.command("build", kernel, args, modfile))
     }
 
     fn command(
@@ -197,7 +217,7 @@ pub fn build(
         subcommand: &str,
         kernel: &KernelBuild,
         args: &[String],
-        module_name: &str,
+        modfile: &PathBuf,
     ) -> Command {
         let mut command = Command::new(&self.executable);
         command
@@ -207,7 +227,7 @@ pub fn build(
             .arg(kernel.rust_target())
             .args(args)
             .env("OBJTREE", &kernel.dir)
-            .env("RUST_MODFILE", module_name)
+            .env("RUST_MODFILE", modfile)
             .env("NOK_KBUILD_DIR", &kernel.dir)
             .env("RUSTC_BOOTSTRAP", "1")
             .env(
