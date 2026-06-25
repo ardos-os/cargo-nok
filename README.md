@@ -4,6 +4,7 @@
 Build kernel modules at the speed of thought
 </p>
 </b>
+
 `cargo-nok` builds out-of-tree Rust Linux kernel modules while keeping Cargo in
 charge of compiling the Rust crate.
 
